@@ -4,8 +4,8 @@ Publicly available Machine Learning model for checking for presence of Tuberculo
 
 This is a lightweight, web-based medical imaging application designed to screen chest X-rays for Tuberculosis (TB). The system utilizes an **Ensemble Learning** approach, combining predictions from three distinct deep learning architectures to improve diagnostic reliability.
 
-## 🚀 Live Demo
-[Insert your Streamlit Cloud Link here, e.g., https://tb-detector.streamlit.app]
+## Live Demo
+https://tbcheck.streamlit.app/
 
 ## 🧠 Model Architectures
 The system runs a simultaneous analysis across three models trained on chest X-ray datasets:
@@ -30,3 +30,5 @@ The system runs a simultaneous analysis across three models trained on chest X-r
 ├── app.py                  # Main Streamlit application
 ├── requirements.txt        # Python dependencies
 └── README.md               # Project documentation
+
+written and deployed by [Joseph Marindi](https://www.linkedin.com/in/joseph-marindi-a6b79825/)
