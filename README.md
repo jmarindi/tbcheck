@@ -32,4 +32,4 @@ The system runs a simultaneous analysis across three models trained on chest X-r
 ├── requirements.txt        # Python dependencies
 └── README.md               # Project documentation
 
-written and deployed by [Joseph Marindi](https://www.linkedin.com/in/joseph-marindi-a6b79825/)
+
