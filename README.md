@@ -20,27 +20,34 @@ An AI-powered diagnostic assistant designed to screen Chest X-rays for Tuberculo
 └── models/              
     └── mobilenetv2_best.keras # Your trained model file
 ```
-🛠️ Installation & Local Setup
-**1. Clone the repository:**
+## Demo link
+[TB_Check](https://tbcheck.streamlit.app/)
 
+## 🛠️ Installation & Local Setup
+
+**1. Clone the repository:**
+```text
 git clone [https://github.com/yourusername/tb-diagnostic-app.git](https://github.com/yourusername/tb-diagnostic-app.git)
 cd tb-diagnostic-app
+```
 
-**2.Install Dependencies:**
+## **2.Install Dependencies:**
 Ensure you have Python 3.10+ installed.
-
+```text
  pip install -r requirements.txt
+```
 
-Run the App:
-
+## 3. Run the App:
+```text
 streamlit run app.py
+```
 
-🧠 How to Interpret Results
+## 🧠 How to Interpret Results
 Red/Orange Zones: These indicate high-intensity regions where the model detected patterns consistent with TB (e.g., opacities, infiltrates, or cavitations).
 
 Blue/Green Zones: These indicate regions with low influence on the model's decision.
 
 Confidence Score: Represents the model's certainty. If the score is higher than your set threshold, the result is flagged as positive.
 
-⚠️ Disclaimer
+## ⚠️ Disclaimer
 This tool is for screening assistance only and is not a replacement for professional medical diagnosis. All AI results should be reviewed by a qualified radiologist or pulmonologist.
