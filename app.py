@@ -11,81 +11,82 @@ import tensorflow as tf
 import numpy as np
 import cv2
 from PIL import Image, ImageOps
+from fpdf import FPDF
+import datetime
+import io
 
 # --- 1. Page Configuration ---
-st.set_page_config(page_title="TB Screening & Explainable AI", page_icon="🩻", layout="wide")
+st.set_page_config(page_title="TB AI Diagnostic Pro", page_icon="🩻", layout="wide")
 
 # --- 2. Robust Model & Layer Detection ---
 @st.cache_resource
 def load_mobilenet_model():
     try:
-        # Load  best .keras model
         model = tf.keras.models.load_model('models/mobilenetv2_best.keras')
         
-        # FIND CONV LAYER: Iterate to find the last layer suitable for Grad-CAM
-        # We check for convolutional types and specific names common in MobileNetV2
+        # IMPROVED LAYER SEARCH: Look for the specific MobileNetV2 bottleneck
         last_conv_layer_name = None
-        for layer in reversed(model.layers):
-            layer_class = layer.__class__.__name__
-            # MobileNetV2 last spatial layers often contain 'Conv' or 'relu'
-            if 'Conv' in layer_class or 'ReLU' in layer_class:
-                # Basic check: skip layers that are likely final dense layers
-                if 'dense' not in layer.name.lower():
+        
+        # Strategy A: Look for common MobileNetV2 names in Keras 3
+        for layer_name in ['out_relu', 'Conv_1', 'top_activation', 'conv2d_last']:
+            try:
+                model.get_layer(layer_name)
+                last_conv_layer_name = layer_name
+                break
+            except ValueError:
+                continue
+        
+        # Strategy B: If names fail, find the last layer that has 4D output tensors
+        if not last_conv_layer_name:
+            for layer in reversed(model.layers):
+                # In Keras 3, we use the layer's output property safely
+                if hasattr(layer, 'output') and len(layer.output.shape) == 4:
                     last_conv_layer_name = layer.name
                     break
-        
-        # Absolute fallbacks for MobileNetV2 architecture
-        if not last_conv_layer_name:
-            for fallback in ['out_relu', 'Conv_1', 'top_conv']:
-                try:
-                    model.get_layer(fallback)
-                    last_conv_layer_name = fallback
-                    break
-                except ValueError:
-                    continue
                     
         return model, last_conv_layer_name
     except Exception as e:
         st.error(f"Error loading model: {e}")
         return None, None
 
-# --- 3. Grad-CAM Logic (Keras 3 Safe) ---
+# --- 3. Grad-CAM & PDF Logic ---
 def generate_gradcam(img_array, model, last_conv_layer_name):
     if not last_conv_layer_name:
         return None
-
-    # Create a sub-model to extract the activations and predictions
     try:
         grad_model = tf.keras.models.Model(
             model.inputs, [model.get_layer(last_conv_layer_name).output, model.output]
         )
-    except Exception:
+        with tf.GradientTape() as tape:
+            last_conv_layer_output, preds = grad_model(img_array)
+            class_channel = preds[:, 0]
+
+        grads = tape.gradient(class_channel, last_conv_layer_output)
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        last_conv_layer_output = last_conv_layer_output[0]
+        heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
+        heatmap = tf.squeeze(heatmap)
+        heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-10)
+        return np.power(heatmap.numpy(), 2) 
+    except:
         return None
 
-    with tf.GradientTape() as tape:
-        last_conv_layer_output, preds = grad_model(img_array)
-        class_channel = preds[:, 0]
-
-    # Gradients of the output class w.r.t. the last conv layer output
-    grads = tape.gradient(class_channel, last_conv_layer_output)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-
-    # Heatmap generation
-    last_conv_layer_output = last_conv_layer_output[0]
-    heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-
-    # Normalize heatmap
-    heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-10)
-    return np.power(heatmap.numpy(), 2) 
-
-def display_gradcam(original_image, heatmap, alpha=0.4):
-    if heatmap is None: return None
-    heatmap = cv2.resize(heatmap, (original_image.size[0], original_image.size[1]))
-    heatmap = np.uint8(255 * heatmap)
-    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-    superimposed_img = cv2.addWeighted(heatmap, alpha, np.array(original_image), 1 - alpha, 0)
-    return superimposed_img
+def create_pdf(verdict, score, threshold):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(200, 10, "TB X-Ray Analysis Report", ln=True, align='C')
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align='C')
+    pdf.ln(10)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, f"Final Verdict: {verdict}", ln=True)
+    pdf.cell(0, 10, f"Confidence Score: {score*100:.2f}%", ln=True)
+    pdf.cell(0, 10, f"Decision Threshold used: {threshold}", ln=True)
+    pdf.ln(20)
+    pdf.set_font("Arial", 'I', 10)
+    pdf.multi_cell(0, 10, "Disclaimer: This is an AI-generated screening assistance report. It is NOT a final diagnosis. Please consult a qualified radiologist.")
+    return pdf.output(dest='S').encode('latin-1')
 
 # --- 4. Main App UI ---
 def main():
@@ -94,13 +95,6 @@ def main():
     
     st.title("🩻 TB Screening & Explainable AI")
     model, last_conv_name = load_mobilenet_model()
-    
-    # Hide technical details in expander
-    with st.expander("Technical System Info"):
-        if last_conv_name:
-            st.success(f"Grad-CAM Target Layer: `{last_conv_name}`")
-        else:
-            st.warning("Could not identify target convolutional layer.")
 
     uploaded_file = st.file_uploader("Upload Chest X-ray", type=["jpg", "png", "jpeg"])
 
@@ -109,40 +103,42 @@ def main():
         
         if st.button("🔍 Run Full Analysis"):
             if model:
-                with st.spinner("Analyzing Lung Features..."):
-                    # MobileNetV2 Preprocessing
+                with st.spinner("Analyzing Lung Pathology..."):
                     img_resized = ImageOps.fit(image, (224, 224), Image.Resampling.LANCZOS)
                     img_array = tf.keras.preprocessing.image.img_to_array(img_resized)
                     img_array = np.expand_dims(img_array, axis=0)
                     img_preprocessed = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
 
-                    # Predictions
                     preds = model.predict(img_preprocessed)
                     score = float(preds[0][0])
                     verdict = "TB POSITIVE" if score >= threshold else "NORMAL"
 
-                    # Visualization
                     heatmap = generate_gradcam(img_preprocessed, model, last_conv_name)
-                    cam_image = display_gradcam(image, heatmap)
-
-                    # Results
+                    
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.image(image, caption="Uploaded X-ray", use_container_width=True)
+                        st.image(image, caption="Original X-ray", use_container_width=True)
                     with col2:
-                        if cam_image is not None:
-                            st.image(cam_image, caption="AI Heatmap (Red = Concern Area)", use_container_width=True)
+                        if heatmap is not None:
+                            heatmap_resized = cv2.resize(heatmap, (image.size[0], image.size[1]))
+                            heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
+                            superimposed = cv2.addWeighted(heatmap_colored, 0.4, np.array(image), 0.6, 0)
+                            st.image(superimposed, caption="AI Heatmap", use_container_width=True)
                         else:
-                            st.info("Heatmap not available for this model configuration.")
+                            st.error("Grad-CAM Layer Identification Failed.")
 
                     st.divider()
                     if verdict == "TB POSITIVE":
                         st.error(f"## Result: {verdict}")
                     else:
                         st.success(f"## Result: {verdict}")
-                    st.metric("Model Confidence Score", f"{score*100:.2f}%")
-            else:
-                st.error("Model not found in /models/ folder.")
+                    
+                    st.metric("Model Confidence", f"{score*100:.2f}%")
+
+                    # PDF Download Feature
+                    pdf_data = create_pdf(verdict, score, threshold)
+                    st.download_button(label="📥 Download Diagnostic Report", data=pdf_data, 
+                                       file_name="TB_Report.pdf", mime="application/pdf")
 
 if __name__ == "__main__":
     main()
