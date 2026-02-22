@@ -24,23 +24,18 @@ def load_mobilenet_model():
         # Loading your best-performing Keras 3 model
         model = tf.keras.models.load_model('models/mobilenetv2_best.keras')
         
-        # RECURSIVE SEARCH: Dives into nested models to find the real conv layer
-        def find_last_conv_recursive(layer):
-            if hasattr(layer, 'layers'): 
-                for sub_layer in reversed(layer.layers):
-                    res = find_last_conv_recursive(sub_layer)
-                    if res: return res
-            # Check for convolutional properties and 4D output rank
-            if 'conv' in layer.name.lower() or isinstance(layer, tf.keras.layers.Conv2D):
-                if len(layer.output_shape) == 4:
-                    return layer.name
-            return None
-
-        last_conv_layer_name = find_last_conv_recursive(model)
+        # FIND LAYER BY NAME: Avoids 'output_shape' attribute errors
+        last_conv_layer_name = None
         
-        # Hardcoded fallbacks specifically for MobileNetV2 architecture
+        # Strategy: Look for specific MobileNetV2 bottleneck names or Conv2D classes
+        for layer in reversed(model.layers):
+            if isinstance(layer, tf.keras.layers.Conv2D) or 'conv' in layer.name.lower():
+                last_conv_layer_name = layer.name
+                break
+        
+        # Fallback to standard MobileNetV2 layer names if the loop misses
         if not last_conv_layer_name:
-            for fallback in ['Conv_1', 'out_relu', 'top_conv', 'top_activation']:
+            for fallback in ['Conv_1', 'out_relu', 'top_conv']:
                 try:
                     model.get_layer(fallback)
                     last_conv_layer_name = fallback
@@ -56,7 +51,7 @@ def load_mobilenet_model():
 def generate_gradcam(img_array, model, last_conv_layer_name):
     if not last_conv_layer_name: return None
     try:
-        # Create a model that outputs both the conv-layer and final prediction
+        # Create a sub-model that maps input to the activations of the target layer
         grad_model = tf.keras.models.Model(
             model.inputs, [model.get_layer(last_conv_layer_name).output, model.output]
         )
@@ -75,7 +70,7 @@ def generate_gradcam(img_array, model, last_conv_layer_name):
     except:
         return None
 
-# --- 4. Modernized PDF Logic ---
+# --- 4. Fixed PDF Generation ---
 def create_pdf_report(verdict, score, threshold):
     pdf = FPDF()
     pdf.add_page()
@@ -85,12 +80,14 @@ def create_pdf_report(verdict, score, threshold):
     pdf.cell(0, 10, f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", align='C', new_x="LMARGIN", new_y="NEXT")
     pdf.ln(10)
     pdf.set_font("helvetica", 'B', 12)
-    pdf.cell(0, 10, f"Diagnostic Consensus: {verdict}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 10, f"AI Confidence Score: {score*100:.2f}%", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 10, f"Result: {verdict}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 10, f"Confidence: {score*100:.2f}%", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(20)
     pdf.set_font("helvetica", 'I', 10)
-    pdf.multi_cell(0, 10, "Disclaimer: This report is an AI-generated screening aid and MUST be validated by a qualified radiologist.")
-    return pdf.output() # fpdf2 returns bytes directly, solving the AttributeError
+    pdf.multi_cell(0, 10, "Disclaimer: This is an AI screening assistant, not a medical diagnosis.")
+    
+    # fpdf2 returns bytes directly. No .encode('latin-1') needed.
+    return bytes(pdf.output())
 
 # --- 5. Main UI ---
 def main():
@@ -107,7 +104,7 @@ def main():
         
         if st.button("🔍 Run Full Analysis"):
             if model:
-                with st.spinner("Analyzing Lung Features..."):
+                with st.spinner("Analyzing Lung Scans..."):
                     # Preprocessing
                     img_resized = ImageOps.fit(image, (224, 224), Image.Resampling.LANCZOS)
                     img_array = tf.keras.preprocessing.image.img_to_array(img_resized)
@@ -131,7 +128,7 @@ def main():
                             superimposed = cv2.addWeighted(h_colored, 0.4, np.array(image), 0.6, 0)
                             st.image(superimposed, caption="AI Pathology Heatmap", use_container_width=True)
                         else:
-                            st.warning("Spatial Heatmap could not be localized.")
+                            st.warning("Spatial heatmap could not be generated for this model.")
 
                     st.divider()
                     if verdict == "TB POSITIVE":
@@ -141,15 +138,13 @@ def main():
                     
                     st.metric("Confidence", f"{score*100:.2f}%")
 
-                    # Safe Download Section
+                    # Error-free PDF Download
                     try:
-                        report_bytes = create_pdf_report(verdict, score, threshold)
-                        st.download_button(label="📥 Download PDF Report", data=report_bytes, 
-                                           file_name="TB_Screening_Report.pdf", mime="application/pdf")
+                        report_data = create_pdf_report(verdict, score, threshold)
+                        st.download_button(label="📥 Download Report", data=report_data, 
+                                           file_name="TB_Report.pdf", mime="application/pdf")
                     except Exception as e:
-                        st.error(f"PDF System Error: {e}")
-            else:
-                st.error("Model is not loaded properly. Check logs.")
+                        st.error(f"PDF Generation Failed: {e}")
 
 if __name__ == "__main__":
     main()
