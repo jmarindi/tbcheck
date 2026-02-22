@@ -1,6 +1,5 @@
-streamlit
-tensorflow-cpu
-Pillow
-numpy
-opencv-python-headless
-fpdf
+streamlit>=1.30.0
+tensorflow-cpu>=2.16.1
+Pillow>=10.0.0
+numpy>=1.23.5
+opencv-python-headless>=4.8.0
