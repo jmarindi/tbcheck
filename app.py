@@ -21,42 +21,42 @@ st.set_page_config(page_title="TB AI Diagnostic Pro", page_icon="🩻", layout="
 @st.cache_resource
 def load_mobilenet_model():
     try:
-        # Loading your best-performing Keras 3 model from the file list
+        # Loading your best-performing Keras 3 model
         model = tf.keras.models.load_model('models/mobilenetv2_best.keras')
         
-        # DYNAMIC SEARCH: Recursive check to find the deep-seated conv layer
-        def find_last_conv(layer):
-            if hasattr(layer, 'layers'): # Check if it's a nested model
+        # RECURSIVE SEARCH: Dives into nested models to find the real conv layer
+        def find_last_conv_recursive(layer):
+            if hasattr(layer, 'layers'): 
                 for sub_layer in reversed(layer.layers):
-                    res = find_last_conv(sub_layer)
+                    res = find_last_conv_recursive(sub_layer)
                     if res: return res
-            if isinstance(layer, tf.keras.layers.Conv2D) or 'conv' in layer.name.lower():
-                # Ensure it's not a 1x1 bottleneck by checking output rank
-                if len(layer.output.shape) == 4:
+            # Check for convolutional properties and 4D output rank
+            if 'conv' in layer.name.lower() or isinstance(layer, tf.keras.layers.Conv2D):
+                if len(layer.output_shape) == 4:
                     return layer.name
             return None
 
-        last_conv_layer_name = find_last_conv(model)
+        last_conv_layer_name = find_last_conv_recursive(model)
         
-        # Fallback to known MobileNetV2 bottleneck names if recursion fails
+        # Hardcoded fallbacks specifically for MobileNetV2 architecture
         if not last_conv_layer_name:
-            for name in ['Conv_1', 'out_relu', 'top_conv']:
+            for fallback in ['Conv_1', 'out_relu', 'top_conv', 'top_activation']:
                 try:
-                    model.get_layer(name)
-                    last_conv_layer_name = name
+                    model.get_layer(fallback)
+                    last_conv_layer_name = fallback
                     break
                 except: continue
                     
         return model, last_conv_layer_name
     except Exception as e:
-        st.error(f"Error loading model: {e}")
+        st.error(f"Initialization Error: {e}")
         return None, None
 
-# --- 3. Grad-CAM & PDF Logic ---
+# --- 3. Robust Grad-CAM Logic ---
 def generate_gradcam(img_array, model, last_conv_layer_name):
-    if not last_conv_layer_name:
-        return None
+    if not last_conv_layer_name: return None
     try:
+        # Create a model that outputs both the conv-layer and final prediction
         grad_model = tf.keras.models.Model(
             model.inputs, [model.get_layer(last_conv_layer_name).output, model.output]
         )
@@ -75,24 +75,24 @@ def generate_gradcam(img_array, model, last_conv_layer_name):
     except:
         return None
 
-def create_pdf(verdict, score, threshold):
+# --- 4. Modernized PDF Logic ---
+def create_pdf_report(verdict, score, threshold):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("helvetica", 'B', 16)
-    pdf.cell(0, 10, "TB X-Ray Analysis Report", new_x="LMARGIN", new_y="NEXT", align='C')
+    pdf.cell(0, 10, "TB X-Ray Analysis Report", align='C', new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("helvetica", size=12)
-    pdf.cell(0, 10, f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT", align='C')
+    pdf.cell(0, 10, f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", align='C', new_x="LMARGIN", new_y="NEXT")
     pdf.ln(10)
     pdf.set_font("helvetica", 'B', 12)
-    pdf.cell(0, 10, f"Final Result: {verdict}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 10, f"Confidence: {score*100:.2f}%", new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(10)
+    pdf.cell(0, 10, f"Diagnostic Consensus: {verdict}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 10, f"AI Confidence Score: {score*100:.2f}%", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(20)
     pdf.set_font("helvetica", 'I', 10)
-    pdf.multi_cell(0, 10, "Disclaimer: This AI report is for screening assistance only. Please consult a professional radiologist for final diagnosis.")
-    # Safe output for modern FPDF2
-    return pdf.output()
+    pdf.multi_cell(0, 10, "Disclaimer: This report is an AI-generated screening aid and MUST be validated by a qualified radiologist.")
+    return pdf.output() # fpdf2 returns bytes directly, solving the AttributeError
 
-# --- 4. Main UI ---
+# --- 5. Main UI ---
 def main():
     st.sidebar.header("⚙️ Settings")
     threshold = st.sidebar.slider("Confidence Threshold", 0.1, 0.9, 0.5, 0.05)
@@ -107,7 +107,7 @@ def main():
         
         if st.button("🔍 Run Full Analysis"):
             if model:
-                with st.spinner("Analyzing Pathology..."):
+                with st.spinner("Analyzing Lung Features..."):
                     # Preprocessing
                     img_resized = ImageOps.fit(image, (224, 224), Image.Resampling.LANCZOS)
                     img_array = tf.keras.preprocessing.image.img_to_array(img_resized)
@@ -123,7 +123,7 @@ def main():
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.image(image, caption="Uploaded Scan", use_container_width=True)
+                        st.image(image, caption="Original X-ray", use_container_width=True)
                     with col2:
                         if heatmap is not None:
                             h_resized = cv2.resize(heatmap, (image.size[0], image.size[1]))
@@ -131,7 +131,7 @@ def main():
                             superimposed = cv2.addWeighted(h_colored, 0.4, np.array(image), 0.6, 0)
                             st.image(superimposed, caption="AI Pathology Heatmap", use_container_width=True)
                         else:
-                            st.warning("Heatmap layer could not be localized for this model.")
+                            st.warning("Spatial Heatmap could not be localized.")
 
                     st.divider()
                     if verdict == "TB POSITIVE":
@@ -141,13 +141,15 @@ def main():
                     
                     st.metric("Confidence", f"{score*100:.2f}%")
 
-                    # Robust PDF Download
+                    # Safe Download Section
                     try:
-                        pdf_bytes = create_pdf(verdict, score, threshold)
-                        st.download_button(label="📥 Download PDF Report", data=pdf_bytes, 
-                                           file_name="TB_Report.pdf", mime="application/pdf")
+                        report_bytes = create_pdf_report(verdict, score, threshold)
+                        st.download_button(label="📥 Download PDF Report", data=report_bytes, 
+                                           file_name="TB_Screening_Report.pdf", mime="application/pdf")
                     except Exception as e:
-                        st.error(f"PDF Generation Failed: {e}")
+                        st.error(f"PDF System Error: {e}")
+            else:
+                st.error("Model is not loaded properly. Check logs.")
 
 if __name__ == "__main__":
     main()
