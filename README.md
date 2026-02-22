@@ -19,7 +19,7 @@ An AI-powered diagnostic assistant designed to screen Chest X-rays for Tuberculo
 ├── packages.txt         # System-level dependencies for Cloud deployment
 └── models/              
     └── mobilenetv2_best.keras # Your trained model file
-
+```
 🛠️ Installation & Local Setup
 **1. Clone the repository:**
 
