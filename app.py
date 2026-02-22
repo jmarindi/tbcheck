@@ -21,19 +21,23 @@ st.set_page_config(page_title="TB AI Diagnostic Pro", page_icon="🩻", layout="
 @st.cache_resource
 def load_mobilenet_model():
     try:
-        # Loading your best-performing Keras 3 model
+        # Loading best-performing model from user directory
         model = tf.keras.models.load_model('models/mobilenetv2_best.keras')
         
-        # FIND LAYER BY NAME: Avoids 'output_shape' attribute errors
-        last_conv_layer_name = None
+        # SEARCH FOR CONV LAYER: Recursive dive into the model structure
+        def find_target_layer(layer):
+            if hasattr(layer, 'layers'): 
+                for sub_layer in reversed(layer.layers):
+                    res = find_target_layer(sub_layer)
+                    if res: return res
+            # We need a 4D output for spatial heatmap localization
+            if ('conv' in layer.name.lower() or isinstance(layer, tf.keras.layers.Conv2D)):
+                return layer.name
+            return None
+
+        last_conv_layer_name = find_target_layer(model)
         
-        # Strategy: Look for specific MobileNetV2 bottleneck names or Conv2D classes
-        for layer in reversed(model.layers):
-            if isinstance(layer, tf.keras.layers.Conv2D) or 'conv' in layer.name.lower():
-                last_conv_layer_name = layer.name
-                break
-        
-        # Fallback to standard MobileNetV2 layer names if the loop misses
+        # Fallbacks for specific MobileNetV2 architecture names
         if not last_conv_layer_name:
             for fallback in ['Conv_1', 'out_relu', 'top_conv']:
                 try:
@@ -51,7 +55,7 @@ def load_mobilenet_model():
 def generate_gradcam(img_array, model, last_conv_layer_name):
     if not last_conv_layer_name: return None
     try:
-        # Create a sub-model that maps input to the activations of the target layer
+        # Create gradient model for feature mapping
         grad_model = tf.keras.models.Model(
             model.inputs, [model.get_layer(last_conv_layer_name).output, model.output]
         )
@@ -70,7 +74,7 @@ def generate_gradcam(img_array, model, last_conv_layer_name):
     except:
         return None
 
-# --- 4. Fixed PDF Generation ---
+# --- 4. Modernized PDF Logic ---
 def create_pdf_report(verdict, score, threshold):
     pdf = FPDF()
     pdf.add_page()
@@ -79,15 +83,12 @@ def create_pdf_report(verdict, score, threshold):
     pdf.set_font("helvetica", size=12)
     pdf.cell(0, 10, f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", align='C', new_x="LMARGIN", new_y="NEXT")
     pdf.ln(10)
-    pdf.set_font("helvetica", 'B', 12)
-    pdf.cell(0, 10, f"Result: {verdict}", new_x="LMARGIN", new_y="NEXT")
-    pdf.cell(0, 10, f"Confidence: {score*100:.2f}%", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 10, f"Diagnostic Result: {verdict}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 10, f"AI Confidence: {score*100:.2f}% (Threshold: {threshold})", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(20)
     pdf.set_font("helvetica", 'I', 10)
-    pdf.multi_cell(0, 10, "Disclaimer: This is an AI screening assistant, not a medical diagnosis.")
-    
-    # fpdf2 returns bytes directly. No .encode('latin-1') needed.
-    return bytes(pdf.output())
+    pdf.multi_cell(0, 10, "Disclaimer: Screening assistance aid. Not a definitive diagnosis.")
+    return pdf.output() # Returns bytes directly for Streamlit
 
 # --- 5. Main UI ---
 def main():
@@ -104,14 +105,14 @@ def main():
         
         if st.button("🔍 Run Full Analysis"):
             if model:
-                with st.spinner("Analyzing Lung Scans..."):
-                    # Preprocessing
+                with st.spinner("Analyzing..."):
+                    # Proper Preprocessing for MobileNetV2
                     img_resized = ImageOps.fit(image, (224, 224), Image.Resampling.LANCZOS)
                     img_array = tf.keras.preprocessing.image.img_to_array(img_resized)
                     img_array = np.expand_dims(img_array, axis=0)
                     img_preprocessed = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
 
-                    # Predictions
+                    # Predict
                     preds = model.predict(img_preprocessed)
                     score = float(preds[0][0])
                     verdict = "TB POSITIVE" if score >= threshold else "NORMAL"
@@ -128,7 +129,7 @@ def main():
                             superimposed = cv2.addWeighted(h_colored, 0.4, np.array(image), 0.6, 0)
                             st.image(superimposed, caption="AI Pathology Heatmap", use_container_width=True)
                         else:
-                            st.warning("Spatial heatmap could not be generated for this model.")
+                            st.warning("Heatmap localization failed.")
 
                     st.divider()
                     if verdict == "TB POSITIVE":
@@ -138,13 +139,15 @@ def main():
                     
                     st.metric("Confidence", f"{score*100:.2f}%")
 
-                    # Error-free PDF Download
+                    # Download PDF Report
                     try:
-                        report_data = create_pdf_report(verdict, score, threshold)
-                        st.download_button(label="📥 Download Report", data=report_data, 
-                                           file_name="TB_Report.pdf", mime="application/pdf")
+                        report_bytes = create_pdf_report(verdict, score, threshold)
+                        st.download_button(label="📥 Download PDF", data=report_bytes, 
+                                           file_name="TB_Diagnostic_Report.pdf", mime="application/pdf")
                     except Exception as e:
-                        st.error(f"PDF Generation Failed: {e}")
+                        st.error(f"PDF Error: {e}")
+            else:
+                st.error("Model load failure.")
 
 if __name__ == "__main__":
     main()
