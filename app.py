@@ -1,114 +1,133 @@
+#TUBERCULOSIS DETECTION SYSTEM - MobileNetV2 Production Version
+#================================================================
+#A robust, production-grade system for TB detection from chest X-rays using MobileNetV2 transfer learning. 
+#Author: Joseph Marindi
+#Date: 2024-06-01
+#Version: 1.0.0 
+#This system is designed for deployment in clinical settings, providing accurate TB screening with explainable AI insights via Grad-CAM visualizations.
+
 import streamlit as st
 import tensorflow as tf
-from PIL import Image, ImageOps
 import numpy as np
-from fpdf import FPDF
+import cv2
+from PIL import Image, ImageOps
 import datetime
 
 # --- 1. Page Configuration ---
-st.set_page_config(page_title="TB Diagnostic Ensemble", page_icon="🩻", layout="wide")
+st.set_page_config(page_title="TB AI Diagnostic Pro", page_icon="🩻", layout="wide")
 
-# --- 2. Model Loading ---
+# --- 2. Model & Layer Setup ---
 @st.cache_resource
-def load_all_models():
+def load_mobilenet_model():
     try:
-        # Replace with your actual .h5 filenames
-        cnn = tf.keras.models.load_model('models/custom_cnn.h5')
-        mobile = tf.keras.models.load_model('models/mobilenetv2_tb.h5')
-        resnet = tf.keras.models.load_model('models/resnet50_tb.h5')
-        return cnn, mobile, resnet
+        # UPDATED: Pointing to your best .keras model file
+        model = tf.keras.models.load_model('models/mobilenetv2_best.keras')
+        
+        # Identify the last convolutional layer automatically for Grad-CAM
+        last_conv_layer_name = None
+        for layer in reversed(model.layers):
+            if isinstance(layer, tf.keras.layers.Conv2D):
+                last_conv_layer_name = layer.name
+                break
+        return model, last_conv_layer_name
     except Exception as e:
-        st.error(f"Error loading models: {e}")
-        return None, None, None
+        st.error(f"Error loading model: {e}")
+        return None, None
 
-# --- 3. Preprocessing Logic ---
-def preprocess_image(image, model_type):
-    size = (224, 224)
-    image = ImageOps.fit(image, size, Image.Resampling.LANCZOS)
-    img_array = tf.keras.preprocessing.image.img_to_array(image)
-    img_array = np.expand_dims(img_array, axis=0)
+# --- 3. Grad-CAM Logic ---
+def generate_gradcam(img_array, model, last_conv_layer_name):
+    # Create a model that maps input image to activations of the last conv layer as well as output predictions
+    grad_model = tf.keras.models.Model(
+        [model.inputs], [model.get_layer(last_conv_layer_name).output, model.output]
+    )
 
-    if model_type == "mobilenet":
-        return tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
-    elif model_type == "resnet":
-        return tf.keras.applications.resnet50.preprocess_input(img_array)
-    else:
-        return img_array / 255.0
+    # Compute the gradient of the top predicted class for the input image
+    with tf.GradientTape() as tape:
+        last_conv_layer_output, preds = grad_model(img_array)
+        class_channel = preds[:, 0]
 
-# --- 4. PDF Generation Function ---
-def create_pdf(results, final_verdict):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(200, 10, "TB X-Ray Analysis Report", ln=True, align='C')
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align='C')
-    pdf.ln(10)
-    
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, "Model Predictions:", ln=True)
-    pdf.set_font("Arial", size=12)
-    for name, score in results.items():
-        status = "Positive" if score > 0.5 else "Negative"
-        pdf.cell(0, 10, f"- {name}: {status} ({score*100:.1f}%)", ln=True)
-    
-    pdf.ln(10)
-    pdf.set_font("Arial", 'B', 14)
-    pdf.cell(0, 10, f"Final Consensus: {final_verdict}", ln=True)
-    
-    pdf.ln(20)
-    pdf.set_font("Arial", 'I', 10)
-    pdf.multi_cell(0, 10, "Disclaimer: This is an AI-generated screening report and must be reviewed by a qualified medical professional.")
-    
-    return pdf.output(dest='S').encode('latin-1')
+    # This is the gradient of the output neuron with regard to the output feature map of the last conv layer
+    grads = tape.gradient(class_channel, last_conv_layer_output)
 
-# --- 5. Main UI ---
+    # Vector of intensity values over a specific feature map channel
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+
+    # Multiply each channel in the feature map array by "how important this channel is" 
+    last_conv_layer_output = last_conv_layer_output[0]
+    heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+
+    # For visualization, we normalize the heatmap between 0 & 1
+    heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
+    # Apply power transform to sharpen the focal points
+    return np.power(heatmap.numpy(), 2) 
+
+def display_gradcam(original_image, heatmap, alpha=0.4):
+    # Resize and colorize heatmap
+    heatmap = cv2.resize(heatmap, (original_image.size[0], original_image.size[1]))
+    heatmap = np.uint8(255 * heatmap)
+    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+    
+    # Overlay on original
+    original_img_np = np.array(original_image)
+    superimposed_img = cv2.addWeighted(heatmap, alpha, original_img_np, 1 - alpha, 0)
+    return superimposed_img
+
+# --- 4. Main App UI ---
 def main():
-    st.title("🩻 TB X-Ray Ensemble Diagnostic System")
-    cnn_model, mobile_model, res_model = load_all_models()
+    st.sidebar.header("⚙️ Diagnostic Settings")
+    # User-adjustable threshold for prediction sensitivity
+    threshold = st.sidebar.slider("Confidence Threshold", 0.1, 0.9, 0.5, 0.05)
+    st.sidebar.info(f"Predictions above {threshold*100:.0f}% will be flagged as TB Positive.")
+
+    st.title("🩻 TB Screening & Explainable AI")
+    st.markdown("This system uses **MobileNetV2** for screening and **Grad-CAM** to highlight areas of concern.")
     
+    model, last_conv_name = load_mobilenet_model()
     uploaded_file = st.file_uploader("Upload Chest X-ray", type=["jpg", "png", "jpeg"])
 
     if uploaded_file:
         image = Image.open(uploaded_file).convert('RGB')
-        col1, col2 = st.columns([1, 1])
         
-        with col1:
-            st.image(image, caption="Uploaded Scan", use_column_width=True)
-        
-        if st.button(" Analyze X-ray"):
-            if cnn_model:
-                with st.spinner("Analyzing..."):
-                    # Predictions
-                    s1 = cnn_model.predict(preprocess_image(image, "custom"))[0][0]
-                    s2 = mobile_model.predict(preprocess_image(image, "mobilenet"))[0][0]
-                    s3 = res_model.predict(preprocess_image(image, "resnet"))[0][0]
-                    
-                    results_dict = {"Custom CNN": s1, "MobileNetV2": s2, "ResNet50": s3}
-                    avg_score = (s1 + s2 + s3) / 3
-                    verdict = "TB POSITIVE" if avg_score > 0.5 else "NORMAL"
+        if st.button("🔍 Run Full Analysis"):
+            if model:
+                with st.spinner("Analyzing Lung Features..."):
+                    # Preprocessing for MobileNetV2
+                    size = (224, 224)
+                    img_resized = ImageOps.fit(image, size, Image.Resampling.LANCZOS)
+                    img_array = tf.keras.preprocessing.image.img_to_array(img_resized)
+                    img_array = np.expand_dims(img_array, axis=0)
+                    img_preprocessed = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
 
+                    # Model Prediction
+                    preds = model.predict(img_preprocessed)
+                    score = float(preds[0][0])
+                    verdict = "TB POSITIVE" if score >= threshold else "NORMAL"
+
+                    # Visualization
+                    heatmap = generate_gradcam(img_preprocessed, model, last_conv_name)
+                    cam_image = display_gradcam(image, heatmap)
+
+                    # UI Layout
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.image(image, caption="Uploaded X-ray", use_container_width=True)
                     with col2:
-                        st.subheader("Results Dashboard")
-                        for name, score in results_dict.items():
-                            st.write(f"**{name}:** {score*100:.1f}% confidence")
-                        
-                        st.divider()
-                        if avg_score > 0.5:
-                            st.error(f"### {verdict}")
-                        else:
-                            st.success(f"### {verdict}")
+                        st.image(cam_image, caption="Pathology Heatmap (Red = Concern Area)", use_container_width=True)
 
-                        # PDF Download
-                        pdf_data = create_pdf(results_dict, verdict)
-                        st.download_button(
-                            label="📥 Download Diagnostic Report",
-                            data=pdf_data,
-                            file_name="tb_report.pdf",
-                            mime="application/pdf"
-                        )
+                    st.divider()
+                    
+                    if verdict == "TB POSITIVE":
+                        st.error(f"## Result: {verdict}")
+                    else:
+                        st.success(f"## Result: {verdict}")
+
+                    st.metric(label="Model Confidence Score", value=f"{score*100:.2f}%")
+                    
+                    if score >= threshold:
+                        st.warning("Heatmap highlights regions that influenced the TB prediction. Please review with a medical professional.")
             else:
-                st.error("Models missing in /models folder.")
+                st.error("Model not found. Please ensure 'models/mobilenetv2_best.keras' exists.")
 
 if __name__ == "__main__":
     main()
