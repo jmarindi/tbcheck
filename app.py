@@ -13,36 +13,39 @@ import cv2
 from PIL import Image, ImageOps
 from fpdf import FPDF
 import datetime
-import io
 
 # --- 1. Page Configuration ---
 st.set_page_config(page_title="TB AI Diagnostic Pro", page_icon="🩻", layout="wide")
 
-# --- 2. Robust Model & Layer Detection ---
+# --- 2. Enhanced Model & Layer Detection ---
 @st.cache_resource
 def load_mobilenet_model():
     try:
+        # Loading your best-performing Keras 3 model from the file list
         model = tf.keras.models.load_model('models/mobilenetv2_best.keras')
         
-        # IMPROVED LAYER SEARCH: Look for the specific MobileNetV2 bottleneck
-        last_conv_layer_name = None
+        # DYNAMIC SEARCH: Recursive check to find the deep-seated conv layer
+        def find_last_conv(layer):
+            if hasattr(layer, 'layers'): # Check if it's a nested model
+                for sub_layer in reversed(layer.layers):
+                    res = find_last_conv(sub_layer)
+                    if res: return res
+            if isinstance(layer, tf.keras.layers.Conv2D) or 'conv' in layer.name.lower():
+                # Ensure it's not a 1x1 bottleneck by checking output rank
+                if len(layer.output.shape) == 4:
+                    return layer.name
+            return None
+
+        last_conv_layer_name = find_last_conv(model)
         
-        # Strategy A: Look for common MobileNetV2 names in Keras 3
-        for layer_name in ['out_relu', 'Conv_1', 'top_activation', 'conv2d_last']:
-            try:
-                model.get_layer(layer_name)
-                last_conv_layer_name = layer_name
-                break
-            except ValueError:
-                continue
-        
-        # Strategy B: If names fail, find the last layer that has 4D output tensors
+        # Fallback to known MobileNetV2 bottleneck names if recursion fails
         if not last_conv_layer_name:
-            for layer in reversed(model.layers):
-                # In Keras 3, we use the layer's output property safely
-                if hasattr(layer, 'output') and len(layer.output.shape) == 4:
-                    last_conv_layer_name = layer.name
+            for name in ['Conv_1', 'out_relu', 'top_conv']:
+                try:
+                    model.get_layer(name)
+                    last_conv_layer_name = name
                     break
+                except: continue
                     
         return model, last_conv_layer_name
     except Exception as e:
@@ -58,13 +61,14 @@ def generate_gradcam(img_array, model, last_conv_layer_name):
             model.inputs, [model.get_layer(last_conv_layer_name).output, model.output]
         )
         with tf.GradientTape() as tape:
-            last_conv_layer_output, preds = grad_model(img_array)
-            class_channel = preds[:, 0]
+            conv_outputs, predictions = grad_model(img_array)
+            loss = predictions[:, 0]
 
-        grads = tape.gradient(class_channel, last_conv_layer_output)
+        grads = tape.gradient(loss, conv_outputs)
         pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-        last_conv_layer_output = last_conv_layer_output[0]
-        heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
+        
+        conv_outputs = conv_outputs[0]
+        heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
         heatmap = tf.squeeze(heatmap)
         heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-10)
         return np.power(heatmap.numpy(), 2) 
@@ -74,21 +78,21 @@ def generate_gradcam(img_array, model, last_conv_layer_name):
 def create_pdf(verdict, score, threshold):
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(200, 10, "TB X-Ray Analysis Report", ln=True, align='C')
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True, align='C')
+    pdf.set_font("helvetica", 'B', 16)
+    pdf.cell(0, 10, "TB X-Ray Analysis Report", new_x="LMARGIN", new_y="NEXT", align='C')
+    pdf.set_font("helvetica", size=12)
+    pdf.cell(0, 10, f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", new_x="LMARGIN", new_y="NEXT", align='C')
     pdf.ln(10)
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, f"Final Verdict: {verdict}", ln=True)
-    pdf.cell(0, 10, f"Confidence Score: {score*100:.2f}%", ln=True)
-    pdf.cell(0, 10, f"Decision Threshold used: {threshold}", ln=True)
-    pdf.ln(20)
-    pdf.set_font("Arial", 'I', 10)
-    pdf.multi_cell(0, 10, "Disclaimer: This is an AI-generated screening assistance report. It is NOT a final diagnosis. Please consult a qualified radiologist.")
-    return pdf.output(dest='S').encode('latin-1')
+    pdf.set_font("helvetica", 'B', 12)
+    pdf.cell(0, 10, f"Final Result: {verdict}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 10, f"Confidence: {score*100:.2f}%", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(10)
+    pdf.set_font("helvetica", 'I', 10)
+    pdf.multi_cell(0, 10, "Disclaimer: This AI report is for screening assistance only. Please consult a professional radiologist for final diagnosis.")
+    # Safe output for modern FPDF2
+    return pdf.output()
 
-# --- 4. Main App UI ---
+# --- 4. Main UI ---
 def main():
     st.sidebar.header("⚙️ Settings")
     threshold = st.sidebar.slider("Confidence Threshold", 0.1, 0.9, 0.5, 0.05)
@@ -103,12 +107,14 @@ def main():
         
         if st.button("🔍 Run Full Analysis"):
             if model:
-                with st.spinner("Analyzing Lung Pathology..."):
+                with st.spinner("Analyzing Pathology..."):
+                    # Preprocessing
                     img_resized = ImageOps.fit(image, (224, 224), Image.Resampling.LANCZOS)
                     img_array = tf.keras.preprocessing.image.img_to_array(img_resized)
                     img_array = np.expand_dims(img_array, axis=0)
                     img_preprocessed = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
 
+                    # Predictions
                     preds = model.predict(img_preprocessed)
                     score = float(preds[0][0])
                     verdict = "TB POSITIVE" if score >= threshold else "NORMAL"
@@ -117,15 +123,15 @@ def main():
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.image(image, caption="Original X-ray", use_container_width=True)
+                        st.image(image, caption="Uploaded Scan", use_container_width=True)
                     with col2:
                         if heatmap is not None:
-                            heatmap_resized = cv2.resize(heatmap, (image.size[0], image.size[1]))
-                            heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
-                            superimposed = cv2.addWeighted(heatmap_colored, 0.4, np.array(image), 0.6, 0)
-                            st.image(superimposed, caption="AI Heatmap", use_container_width=True)
+                            h_resized = cv2.resize(heatmap, (image.size[0], image.size[1]))
+                            h_colored = cv2.applyColorMap(np.uint8(255 * h_resized), cv2.COLORMAP_JET)
+                            superimposed = cv2.addWeighted(h_colored, 0.4, np.array(image), 0.6, 0)
+                            st.image(superimposed, caption="AI Pathology Heatmap", use_container_width=True)
                         else:
-                            st.error("Grad-CAM Layer Identification Failed.")
+                            st.warning("Heatmap layer could not be localized for this model.")
 
                     st.divider()
                     if verdict == "TB POSITIVE":
@@ -133,12 +139,15 @@ def main():
                     else:
                         st.success(f"## Result: {verdict}")
                     
-                    st.metric("Model Confidence", f"{score*100:.2f}%")
+                    st.metric("Confidence", f"{score*100:.2f}%")
 
-                    # PDF Download Feature
-                    pdf_data = create_pdf(verdict, score, threshold)
-                    st.download_button(label="📥 Download Diagnostic Report", data=pdf_data, 
-                                       file_name="TB_Report.pdf", mime="application/pdf")
+                    # Robust PDF Download
+                    try:
+                        pdf_bytes = create_pdf(verdict, score, threshold)
+                        st.download_button(label="📥 Download PDF Report", data=pdf_bytes, 
+                                           file_name="TB_Report.pdf", mime="application/pdf")
+                    except Exception as e:
+                        st.error(f"PDF Generation Failed: {e}")
 
 if __name__ == "__main__":
     main()
