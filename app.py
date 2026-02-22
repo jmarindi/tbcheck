@@ -16,118 +16,118 @@ import datetime
 # --- 1. Page Configuration ---
 st.set_page_config(page_title="TB AI Diagnostic Pro", page_icon="🩻", layout="wide")
 
-# --- 2. Model & Layer Setup ---
+# --- 2. Robust Model Loading ---
 @st.cache_resource
 def load_mobilenet_model():
     try:
-        # UPDATED: Pointing to your best .keras model file
+        # UPDATED: Using the best .keras file as suggested
         model = tf.keras.models.load_model('models/mobilenetv2_best.keras')
         
-        # Identify the last convolutional layer automatically for Grad-CAM
+        # FIND CONV LAYER: Specifically search for the last layer with 4D output
         last_conv_layer_name = None
         for layer in reversed(model.layers):
-            if isinstance(layer, tf.keras.layers.Conv2D):
+            # Grad-CAM needs a layer with spatial dimensions (typically Conv2D)
+            if len(layer.output_shape) == 4 and "conv" in layer.name.lower():
                 last_conv_layer_name = layer.name
                 break
+        
+        # Fallback: Many MobileNetV2 models use 'out_relu' or 'Conv_1'
+        if not last_conv_layer_name:
+            for layer_name in ['out_relu', 'Conv_1', 'top_conv']:
+                try:
+                    model.get_layer(layer_name)
+                    last_conv_layer_name = layer_name
+                    break
+                except ValueError:
+                    continue
+                    
         return model, last_conv_layer_name
     except Exception as e:
-        st.error(f"Error loading model: {e}")
+        st.error(f"Error loading model or identifying layers: {e}")
         return None, None
 
 # --- 3. Grad-CAM Logic ---
 def generate_gradcam(img_array, model, last_conv_layer_name):
-    # Create a model that maps input image to activations of the last conv layer as well as output predictions
+    # Ensure a layer name was actually found
+    if not last_conv_layer_name:
+        return None
+
     grad_model = tf.keras.models.Model(
         [model.inputs], [model.get_layer(last_conv_layer_name).output, model.output]
     )
 
-    # Compute the gradient of the top predicted class for the input image
     with tf.GradientTape() as tape:
         last_conv_layer_output, preds = grad_model(img_array)
         class_channel = preds[:, 0]
 
-    # This is the gradient of the output neuron with regard to the output feature map of the last conv layer
     grads = tape.gradient(class_channel, last_conv_layer_output)
-
-    # Vector of intensity values over a specific feature map channel
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
-    # Multiply each channel in the feature map array by "how important this channel is" 
     last_conv_layer_output = last_conv_layer_output[0]
     heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
     heatmap = tf.squeeze(heatmap)
 
-    # For visualization, we normalize the heatmap between 0 & 1
-    heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
-    # Apply power transform to sharpen the focal points
+    heatmap = tf.maximum(heatmap, 0) / (tf.math.reduce_max(heatmap) + 1e-10)
     return np.power(heatmap.numpy(), 2) 
 
 def display_gradcam(original_image, heatmap, alpha=0.4):
-    # Resize and colorize heatmap
+    if heatmap is None:
+        return None
     heatmap = cv2.resize(heatmap, (original_image.size[0], original_image.size[1]))
     heatmap = np.uint8(255 * heatmap)
     heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-    
-    # Overlay on original
-    original_img_np = np.array(original_image)
-    superimposed_img = cv2.addWeighted(heatmap, alpha, original_img_np, 1 - alpha, 0)
+    superimposed_img = cv2.addWeighted(heatmap, alpha, np.array(original_image), 1 - alpha, 0)
     return superimposed_img
 
-# --- 4. Main App UI ---
+# --- 4. Main UI ---
 def main():
-    st.sidebar.header("⚙️ Diagnostic Settings")
-    # User-adjustable threshold for prediction sensitivity
+    st.sidebar.header("⚙️ Settings")
     threshold = st.sidebar.slider("Confidence Threshold", 0.1, 0.9, 0.5, 0.05)
-    st.sidebar.info(f"Predictions above {threshold*100:.0f}% will be flagged as TB Positive.")
-
-    st.title("🩻 TB Screening & Explainable AI")
-    st.markdown("This system uses **MobileNetV2** for screening and **Grad-CAM** to highlight areas of concern.")
     
+    st.title("🩻 TB Screening & Explainable AI")
     model, last_conv_name = load_mobilenet_model()
+    
+    # Debug info (hidden by default)
+    with st.expander("System Info"):
+        st.write(f"Detected Target Layer: `{last_conv_name}`")
+
     uploaded_file = st.file_uploader("Upload Chest X-ray", type=["jpg", "png", "jpeg"])
 
     if uploaded_file:
         image = Image.open(uploaded_file).convert('RGB')
         
         if st.button("🔍 Run Full Analysis"):
-            if model:
-                with st.spinner("Analyzing Lung Features..."):
-                    # Preprocessing for MobileNetV2
-                    size = (224, 224)
-                    img_resized = ImageOps.fit(image, size, Image.Resampling.LANCZOS)
+            if model and last_conv_name:
+                with st.spinner("Analyzing..."):
+                    img_resized = ImageOps.fit(image, (224, 224), Image.Resampling.LANCZOS)
                     img_array = tf.keras.preprocessing.image.img_to_array(img_resized)
                     img_array = np.expand_dims(img_array, axis=0)
                     img_preprocessed = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
 
-                    # Model Prediction
                     preds = model.predict(img_preprocessed)
                     score = float(preds[0][0])
                     verdict = "TB POSITIVE" if score >= threshold else "NORMAL"
 
-                    # Visualization
                     heatmap = generate_gradcam(img_preprocessed, model, last_conv_name)
                     cam_image = display_gradcam(image, heatmap)
 
-                    # UI Layout
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.image(image, caption="Uploaded X-ray", use_container_width=True)
+                        st.image(image, caption="Original", use_container_width=True)
                     with col2:
-                        st.image(cam_image, caption="Pathology Heatmap (Red = Concern Area)", use_container_width=True)
+                        if cam_image is not None:
+                            st.image(cam_image, caption="AI Heatmap", use_container_width=True)
+                        else:
+                            st.warning("Could not generate heatmap.")
 
                     st.divider()
-                    
                     if verdict == "TB POSITIVE":
                         st.error(f"## Result: {verdict}")
                     else:
                         st.success(f"## Result: {verdict}")
-
-                    st.metric(label="Model Confidence Score", value=f"{score*100:.2f}%")
-                    
-                    if score >= threshold:
-                        st.warning("Heatmap highlights regions that influenced the TB prediction. Please review with a medical professional.")
+                    st.metric("Confidence", f"{score*100:.2f}%")
             else:
-                st.error("Model not found. Please ensure 'models/mobilenetv2_best.keras' exists.")
+                st.error("Missing model or target layers. Check 'System Info'.")
 
 if __name__ == "__main__":
     main()

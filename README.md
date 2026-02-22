@@ -1,15 +1,15 @@
 # tbcheck
 Publicly available Machine Learning model for checking for presence of Tuberculosis in an X-rays 
 written and deployed by [Joseph Marindi](https://www.linkedin.com/in/joseph-marindi-a6b79825/)
-# 🩻 TB X-Ray Diagnostic Ensemble System
+# 🩻 TB X-Ray Diagnostic System
 
-This is a lightweight, web-based medical imaging application designed to screen chest X-rays for Tuberculosis (TB). The system utilizes an **Ensemble Learning** approach, combining predictions from three distinct deep learning architectures to improve diagnostic reliability.
+This is a lightweight, web-based medical imaging application designed to screen chest X-rays for Tuberculosis (TB). The system utilizes predictions from mobilenetv2 deep learning architecture.
 
 ## Live Demo
 [tbcheckdemo](https://tbcheck.streamlit.app/)
 
 ## 🧠 Model Architectures
-The system runs a simultaneous analysis across three models trained on chest X-ray datasets:
+The system runs  analysis across three models trained on chest X-ray datasets:
 1. **Custom CNN:** A lightweight convolutional neural network optimized for specific feature extraction.
 2. **MobileNetV2:** A highly efficient architecture utilizing depthwise separable convolutions, ideal for web deployment.
 3. **ResNet50:** A deep residual network that uses skip connections to identify complex patterns in lung tissue.
